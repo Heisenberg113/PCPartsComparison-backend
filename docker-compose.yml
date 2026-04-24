@@ -1,0 +1,41 @@
+name: pc-parts-comparision
+
+services:
+  postgres-pc-part:
+    image: pgvector/pgvector:pg16
+    container_name: postgres_db_pc_part
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: pc_parts_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_cache
+    # command: redis-server --requirepass myredispassword
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redisinsight_pc_part
+    ports:
+      - "5540:5540"
+    volumes:
+      - redisinsight_data:/data
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
+  redisinsight_data:

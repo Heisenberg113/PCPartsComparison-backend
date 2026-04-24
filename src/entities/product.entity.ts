@@ -9,6 +9,7 @@ import {
 } from 'typeorm';
 import { Price } from './price.entity';
 import { Review } from './review.entity';
+import { vector } from 'pgvector/drizzle-orm';
 
 export enum ProductCategory {
   CPU = 'cpu',
@@ -60,6 +61,13 @@ export class Product {
 
   @Column({ type: 'int', default: 0 })
   review_count: number;
+
+  @Column({
+  type: 'vector', 
+  length: 1024,
+  nullable: true 
+  })
+  embedding: number[] | string;
 
   @CreateDateColumn()
   created_at: Date;
