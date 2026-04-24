@@ -2,7 +2,7 @@ name: pc-parts-comparision
 
 services:
   postgres-pc-part:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: postgres_db_pc_part
     environment:
       POSTGRES_USER: myuser

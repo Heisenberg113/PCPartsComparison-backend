@@ -11,6 +11,8 @@ export const getDatabaseConfig = (
   password: configService.get<string>('DB_PASSWORD', 'pcparts_secret_2024'),
   database: configService.get<string>('DB_DATABASE', 'pcparts'),
   entities: [__dirname + '/../entities/*.entity{.ts,.js}'],
+  migrations: [__dirname + '/../migrations/*.{ts,js}'],
+  migrationsRun: true,
   synchronize: configService.get<string>('NODE_ENV') === 'development',
   logging: configService.get<string>('NODE_ENV') === 'development',
 });
