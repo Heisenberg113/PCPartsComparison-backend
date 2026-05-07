@@ -1,1 +1,1 @@
-export { SuggestBuildDto, SaveBuildDto } from './build.dto';
+export { SuggestBuildDto, SaveBuildDto, UpdateBuildDto } from './build.dto';

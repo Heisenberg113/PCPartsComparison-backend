@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, Min, Max } from 'class-validator';
+import { IsNumber, IsOptional, IsString, IsObject, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -26,10 +26,32 @@ export class SaveBuildDto {
   @ApiProperty({
     example: { cpu: 1, gpu: 7, ram: 12, ssd: 16, mainboard: 20, psu: 23, case: 25 },
   })
-  components: Record<string, number>;
+  @IsObject()
+  components: Record<string, any>;
 
   @ApiProperty({ example: 20000000 })
   @Type(() => Number)
   @IsNumber()
   total_price: number;
 }
+
+export class UpdateBuildDto {
+  @ApiPropertyOptional({ example: 'Gaming Build Updated' })
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @ApiPropertyOptional({
+    example: { cpu: 1, gpu: 7, ram: 12, ssd: 16, mainboard: 20, psu: 23, case: 25 },
+  })
+  @IsOptional()
+  @IsObject()
+  components?: Record<string, any>;
+
+  @ApiPropertyOptional({ example: 22000000 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  total_price?: number;
+}
+

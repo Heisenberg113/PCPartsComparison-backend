@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BuildConfig, Product, ProductCategory } from '../../entities';
-import { SuggestBuildDto, SaveBuildDto } from './dto';
+import { SuggestBuildDto, SaveBuildDto, UpdateBuildDto } from './dto';
 
 // Budget allocation ratios by purpose
 const BUDGET_RATIOS: Record<string, Record<string, number>> = {
@@ -61,7 +61,7 @@ export class BuildService {
     private readonly productRepo: Repository<Product>,
     @InjectRepository(BuildConfig)
     private readonly buildRepo: Repository<BuildConfig>,
-  ) {}
+  ) { }
 
   async suggest(dto: SuggestBuildDto) {
     const purpose = dto.purpose || 'gaming';
@@ -94,6 +94,8 @@ export class BuildService {
         const cheapest = await this.productRepo
           .createQueryBuilder('p')
           .where('p.category = :category', { category })
+          .andWhere('p.base_price IS NOT NULL')
+          .andWhere('p.base_price > 0')
           .orderBy('p.base_price', 'ASC')
           .getOne();
 
@@ -132,6 +134,21 @@ export class BuildService {
       where: { user_id: userId },
       order: { created_at: 'DESC' },
     });
+  }
+
+  async updateBuild(userId: number, buildId: number, dto: UpdateBuildDto) {
+    const build = await this.buildRepo.findOne({
+      where: { id: buildId, user_id: userId },
+    });
+    if (!build) {
+      throw new NotFoundException('Cấu hình không tồn tại');
+    }
+
+    if (dto.name !== undefined) build.name = dto.name;
+    if (dto.components !== undefined) build.components = dto.components;
+    if (dto.total_price !== undefined) build.total_price = dto.total_price;
+
+    return this.buildRepo.save(build);
   }
 
   async deleteBuild(userId: number, buildId: number) {
