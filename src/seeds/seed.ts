@@ -299,11 +299,11 @@ const products: Partial<Product>[] = [
     },
   },
 
-  // === SSDs ===
+  // === HARDDRIVEs ===
   {
     name: 'Samsung 990 Pro 1TB NVMe M.2',
     slug: 'samsung-990-pro-1tb',
-    category: ProductCategory.SSD,
+    category: ProductCategory.HARDDRIVE,
     brand: 'Samsung',
     base_price: 2890000,
     image_url: 'https://placehold.co/400x400/16213e/0f3460?text=990+Pro',
@@ -321,7 +321,7 @@ const products: Partial<Product>[] = [
   {
     name: 'WD Black SN850X 1TB NVMe M.2',
     slug: 'wd-black-sn850x-1tb',
-    category: ProductCategory.SSD,
+    category: ProductCategory.HARDDRIVE,
     brand: 'Western Digital',
     base_price: 2490000,
     image_url: 'https://placehold.co/400x400/16213e/0f3460?text=SN850X',
@@ -339,7 +339,7 @@ const products: Partial<Product>[] = [
   {
     name: 'Kingston NV2 1TB NVMe M.2',
     slug: 'kingston-nv2-1tb',
-    category: ProductCategory.SSD,
+    category: ProductCategory.HARDDRIVE,
     brand: 'Kingston',
     base_price: 1290000,
     image_url: 'https://placehold.co/400x400/16213e/0f3460?text=NV2',
@@ -357,7 +357,7 @@ const products: Partial<Product>[] = [
   {
     name: 'Samsung 870 EVO 500GB SATA',
     slug: 'samsung-870-evo-500gb',
-    category: ProductCategory.SSD,
+    category: ProductCategory.HARDDRIVE,
     brand: 'Samsung',
     base_price: 1490000,
     image_url: 'https://placehold.co/400x400/16213e/0f3460?text=870+EVO',

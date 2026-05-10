@@ -24,7 +24,7 @@ export class SaveBuildDto {
   name: string;
 
   @ApiProperty({
-    example: { cpu: 1, gpu: 7, ram: 12, ssd: 16, mainboard: 20, psu: 23, case: 25 },
+    example: { cpu: 1, gpu: 7, ram: 12, harddrive: 16, mainboard: 20, psu: 23, case: 25 },
   })
   @IsObject()
   components: Record<string, any>;
@@ -42,7 +42,7 @@ export class UpdateBuildDto {
   name?: string;
 
   @ApiPropertyOptional({
-    example: { cpu: 1, gpu: 7, ram: 12, ssd: 16, mainboard: 20, psu: 23, case: 25 },
+    example: { cpu: 1, gpu: 7, ram: 12, harddrive: 16, mainboard: 20, psu: 23, case: 25 },
   })
   @IsOptional()
   @IsObject()
