@@ -56,6 +56,11 @@ export class FilterProductDto {
   @IsOptional()
   @IsString()
   sort_order?: 'ASC' | 'DESC' = 'DESC';
+
+  @ApiPropertyOptional({ description: 'JSON: {"Socket":"AM5","TDP":{"min":50,"max":125}}' })
+  @IsOptional()
+  @IsString()
+  specs_filter?: string;
 }
 
 export class CompareProductsDto {

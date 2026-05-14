@@ -31,20 +31,71 @@ export class ProductService {
       });
     }
 
-    // Price range
-    if (filter.min_price !== undefined) {
-      qb.andWhere('p.base_price >= :minPrice', { minPrice: filter.min_price });
+    // Price range — dùng prices table vì base_price có thể = 0 (chưa crawl)
+    if (filter.min_price !== undefined || filter.max_price !== undefined) {
+      const conditions = ['pr.product_id = p.id'];
+      const priceParams: Record<string, number> = {};
+      if (filter.min_price !== undefined) {
+        conditions.push('pr.price >= :minPrice');
+        priceParams.minPrice = filter.min_price;
+      }
+      if (filter.max_price !== undefined) {
+        conditions.push('pr.price <= :maxPrice');
+        priceParams.maxPrice = filter.max_price;
+      }
+      qb.andWhere(
+        `EXISTS (SELECT 1 FROM prices pr WHERE ${conditions.join(' AND ')})`,
+        priceParams,
+      );
     }
-    if (filter.max_price !== undefined) {
-      qb.andWhere('p.base_price <= :maxPrice', { maxPrice: filter.max_price });
+
+    // Spec filters (JSONB) — {"Socket":"AM5"} hoặc {"TDP":{"min":50,"max":125}}
+    if (filter.specs_filter) {
+      try {
+        const specsObj = JSON.parse(filter.specs_filter) as Record<string, unknown>;
+        let idx = 0;
+        for (const [rawKey, value] of Object.entries(specsObj)) {
+          const escapedKey = rawKey.replace(/'/g, "''");
+          const jsonPath = `p.specs->>'${escapedKey}'`;
+          if (typeof value === 'string') {
+            const vp = `spv${idx}`;
+            qb.andWhere(`${jsonPath} = :${vp}`, { [vp]: value });
+          } else if (value !== null && typeof value === 'object') {
+            const range = value as { min?: number; max?: number };
+            // NULLIF(..., '') handles empty extract → NULL instead of cast error
+            const numExpr = `NULLIF(regexp_replace(COALESCE(${jsonPath}, ''), '[^0-9.]', '', 'g'), '')::numeric`;
+            if (range.min !== undefined) {
+              const mp = `spm${idx}`;
+              qb.andWhere(`${numExpr} >= :${mp}`, { [mp]: range.min });
+            }
+            if (range.max !== undefined) {
+              const xp = `spx${idx}`;
+              qb.andWhere(`${numExpr} <= :${xp}`, { [xp]: range.max });
+            }
+          }
+          idx++;
+        }
+      } catch {
+        // JSON không hợp lệ, bỏ qua
+      }
     }
 
     // Sorting
     const sortBy = filter.sort_by || 'created_at';
-    const sortField = ['name', 'base_price', 'avg_rating', 'created_at'].includes(sortBy)
-      ? `p.${sortBy}`
-      : 'p.created_at';
-    qb.orderBy(sortField, filter.sort_order === 'ASC' ? 'ASC' : 'DESC');
+    const sortDir = filter.sort_order === 'ASC' ? 'ASC' : 'DESC';
+    if (sortBy === 'base_price') {
+      // Sắp xếp theo giá thực từ prices table, sản phẩm chưa có giá xuống cuối
+      qb.orderBy(
+        `(SELECT MIN(pr.price) FROM prices pr WHERE pr.product_id = p.id)`,
+        sortDir,
+        'NULLS LAST',
+      );
+    } else {
+      const sortField = ['name', 'avg_rating', 'created_at'].includes(sortBy)
+        ? `p.${sortBy}`
+        : 'p.created_at';
+      qb.orderBy(sortField, sortDir);
+    }
 
     // Pagination
     const page = filter.page || 1;
@@ -52,6 +103,23 @@ export class ProductService {
     qb.skip((page - 1) * limit).take(limit);
 
     const [data, total] = await qb.getManyAndCount();
+
+    // Đính kèm min_price từ bảng prices (1 query batch, không phải N+1)
+    if (data.length > 0) {
+      const ids = data.map(p => p.id);
+      const rows: { product_id: number; min_price: string }[] =
+        await this.productRepo.manager.query(
+          `SELECT product_id, MIN(price)::int AS min_price
+           FROM prices WHERE product_id = ANY($1)
+           GROUP BY product_id`,
+          [ids],
+        );
+      const priceMap = new Map(rows.map(r => [r.product_id, Number(r.min_price)]));
+      return {
+        data: data.map(p => ({ ...p, min_price: priceMap.get(p.id) ?? null })),
+        meta: { total, page, limit, total_pages: Math.ceil(total / limit) },
+      };
+    }
 
     return {
       data,

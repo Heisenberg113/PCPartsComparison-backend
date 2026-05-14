@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -14,6 +15,7 @@ import { PriceModule } from './modules/price/price.module';
 import { ReviewModule } from './modules/review/review.module';
 import { BuildModule } from './modules/build/build.module';
 import { SearchModule } from './modules/search/search.module';
+import { PriceCrawlerModule } from './modules/price-crawler/price-crawler.module';
 
 @Module({
   imports: [
@@ -30,12 +32,14 @@ import { SearchModule } from './modules/search/search.module';
       ttl: 60000,  // 60 seconds
       limit: 100,  // 100 requests per 60s
     }]),
+    ScheduleModule.forRoot(),
     AuthModule,
     ProductModule,
     PriceModule,
     ReviewModule,
     BuildModule,
     SearchModule,
+    PriceCrawlerModule,
   ],
   controllers: [AppController],
   providers: [
@@ -46,4 +50,4 @@ import { SearchModule } from './modules/search/search.module';
     },
   ],
 })
-export class AppModule {}
+export class AppModule { }
