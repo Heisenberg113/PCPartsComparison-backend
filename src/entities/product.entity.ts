@@ -61,6 +61,13 @@ export class Product {
   @Column({ type: 'int', default: 0 })
   review_count: number;
 
+  // Rating từ cộng đồng PCPartPicker (tách biệt với review nội bộ)
+  @Column({ type: 'decimal', precision: 3, scale: 1, nullable: true })
+  ext_rating: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  ext_review_count: number | null;
+
   @Column({
   type: 'vector', 
   length: 1024,
