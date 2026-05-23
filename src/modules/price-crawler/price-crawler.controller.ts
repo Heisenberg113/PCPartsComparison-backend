@@ -10,6 +10,7 @@ import {
     UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags, ApiOperation } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PriceCrawlerService } from './price-crawler.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
@@ -18,6 +19,7 @@ import { Roles } from '../auth/decorators';
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('admin')
+@SkipThrottle()
 @Controller('crawler')
 export class PriceCrawlerController {
     constructor(private readonly crawlerService: PriceCrawlerService) { }

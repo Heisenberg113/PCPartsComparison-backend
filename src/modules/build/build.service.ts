@@ -13,32 +13,6 @@ const BUDGET_RATIOS: Record<string, Record<string, number>> = {
   streaming:   { cpu: 0.25, gpu: 0.30, ram: 0.10, harddrive: 0.10, mainboard: 0.10, psu: 0.08, case: 0.07 },
 };
 
-const BUDGET_RATIOS_ALT: Record<string, Array<{ ratios: Record<string, number>; label: string; description: string }>> = {
-  gaming: [
-    { ratios: { cpu: 0.25, gpu: 0.30, ram: 0.10, harddrive: 0.07, mainboard: 0.12, psu: 0.08, case: 0.08 },
-      label: 'Cân bằng CPU–GPU', description: 'Tăng ngân sách CPU, giảm nhẹ GPU — tốt cho game + đa nhiệm' },
-    { ratios: { cpu: 0.18, gpu: 0.40, ram: 0.07, harddrive: 0.07, mainboard: 0.12, psu: 0.09, case: 0.07 },
-      label: 'Ưu tiên GPU tối đa', description: 'GPU chiếm 40% ngân sách — tối ưu FPS cho game AAA' },
-  ],
-  workstation: [
-    { ratios: { cpu: 0.35, gpu: 0.20, ram: 0.15, harddrive: 0.10, mainboard: 0.08, psu: 0.06, case: 0.06 },
-      label: 'Ưu tiên CPU & RAM', description: 'CPU mạnh + RAM nhiều cho render, compile, ảo hóa' },
-    { ratios: { cpu: 0.28, gpu: 0.28, ram: 0.14, harddrive: 0.10, mainboard: 0.10, psu: 0.06, case: 0.04 },
-      label: 'Đa dụng Render+Game', description: 'CPU và GPU cân bằng — vừa làm việc vừa giải trí' },
-  ],
-  office: [
-    { ratios: { cpu: 0.30, gpu: 0.05, ram: 0.20, harddrive: 0.15, mainboard: 0.13, psu: 0.10, case: 0.07 },
-      label: 'Ưu tiên CPU + RAM', description: 'CPU + RAM mạnh, không cần GPU rời, phù hợp văn phòng nặng' },
-    { ratios: { cpu: 0.20, gpu: 0.08, ram: 0.15, harddrive: 0.22, mainboard: 0.17, psu: 0.10, case: 0.08 },
-      label: 'Ưu tiên lưu trữ', description: 'Nhiều dung lượng ổ cứng, phù hợp lưu trữ dữ liệu lớn' },
-  ],
-  streaming: [
-    { ratios: { cpu: 0.30, gpu: 0.25, ram: 0.12, harddrive: 0.10, mainboard: 0.10, psu: 0.07, case: 0.06 },
-      label: 'Ưu tiên CPU encode', description: 'CPU mạnh cho encode stream phần mềm, GPU vừa đủ cho game' },
-    { ratios: { cpu: 0.22, gpu: 0.35, ram: 0.08, harddrive: 0.10, mainboard: 0.12, psu: 0.07, case: 0.06 },
-      label: 'Ưu tiên GPU stream', description: 'GPU mạnh dùng NVENC/AMF encode — giảm tải CPU' },
-  ],
-};
 
 export const RATIO_EXPLANATIONS: Record<string, { label: string; description: string; components: Record<string, string> }> = {
   gaming: {
@@ -125,8 +99,16 @@ function parseM2Size(formFactor: string): string | null {
   return m ? m[1] : null;
 }
 
+// Larger M-key slot sizes that physically accommodate standard 2280 drives
+const M2_COMPAT_WITH_2280 = new Set(['2580', '25110', '22110']);
+
 function m2SizeCompatible(size: string, slots: string[]): boolean {
-  return slots.some((slot) => slot.replace(/[^0-9/]/g, '').split('/').includes(size));
+  return slots.some((slot) => {
+    const nums = slot.replace(/[^0-9/]/g, '').split('/').filter(Boolean);
+    if (nums.includes(size)) return true;
+    if (size === '2280' && nums.some((n) => M2_COMPAT_WITH_2280.has(n))) return true;
+    return false;
+  });
 }
 
 function parseSataCount(sata: string | number | null | undefined): number {
@@ -147,7 +129,6 @@ export class BuildService {
   getBudgetRatios() {
     return {
       presets: BUDGET_RATIOS,
-      alternatives: BUDGET_RATIOS_ALT,
       explanations: RATIO_EXPLANATIONS,
     };
   }
@@ -155,23 +136,54 @@ export class BuildService {
   async suggest(dto: SuggestBuildDto) {
     const purpose = dto.purpose || 'gaming';
     const mainRatios = dto.custom_ratios ?? BUDGET_RATIOS[purpose] ?? BUDGET_RATIOS.gaming;
-    const alts = BUDGET_RATIOS_ALT[purpose] ?? BUDGET_RATIOS_ALT.gaming;
 
-    const [main, alt1, alt2] = await Promise.all([
-      this.buildFromRatios(dto.budget, purpose, mainRatios, 'Cấu hình chính'),
-      this.buildFromRatios(dto.budget, purpose, alts[0].ratios, alts[0].label),
-      this.buildFromRatios(dto.budget, purpose, alts[1].ratios, alts[1].label),
+    // Query top CPUs within budget sorted DESC by price; first = main, next 2 = alternatives
+    const cpuBudget = dto.budget * (mainRatios['cpu'] ?? 0);
+    const topCpus = await this.productRepo
+      .createQueryBuilder('p')
+      .where('p.category = :cat', { cat: CATEGORY_MAP['cpu'] })
+      .andWhere('p.base_price IS NOT NULL')
+      .andWhere('p.base_price > 0')
+      .andWhere('p.base_price <= :budget', { budget: cpuBudget * 1.15 })
+      .orderBy('p.base_price', 'DESC')
+      .limit(3)
+      .getMany();
+
+    const [mainCpu = null, ...altCpus] = topCpus;
+
+    const [main, ...altBuilds] = await Promise.all([
+      this.buildFromRatios(dto.budget, purpose, mainRatios, 'Cấu hình chính', mainCpu),
+      ...altCpus.map((cpu, i) =>
+        this.buildFromRatios(dto.budget, purpose, mainRatios, `Cấu hình thay thế ${i + 1}`, cpu),
+      ),
     ]);
 
     return {
       ...main,
       budget_ratios: mainRatios,
       ratio_explanation: RATIO_EXPLANATIONS[purpose] ?? null,
-      alternatives: [
-        { ...alt1, alt_description: alts[0].description },
-        { ...alt2, alt_description: alts[1].description },
-      ],
+      alternatives: altBuilds.map((alt) => ({
+        ...alt,
+        alt_description: `CPU thay thế cùng tầm giá: ${alt.components['cpu']?.product?.name ?? ''}`,
+      })),
     };
+  }
+
+  private async findBest(category: ProductCategory, categoryBudget: number): Promise<Product | null> {
+    const within = await this.productRepo
+      .createQueryBuilder('p')
+      .where('p.category = :cat', { cat: category })
+      .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+      .andWhere('p.base_price <= :budget', { budget: categoryBudget * 1.15 })
+      .orderBy('p.base_price', 'DESC')
+      .getOne();
+    if (within) return within;
+    return this.productRepo
+      .createQueryBuilder('p')
+      .where('p.category = :cat', { cat: category })
+      .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+      .orderBy('p.base_price', 'ASC')
+      .getOne();
   }
 
   private async buildFromRatios(
@@ -179,6 +191,7 @@ export class BuildService {
     purpose: string,
     ratios: Record<string, number>,
     label: string,
+    forcedCpu?: Product | null,
   ) {
     const suggested: Record<string, any> = {};
     const compatibilityWarnings: string[] = [];
@@ -193,25 +206,14 @@ export class BuildService {
       totalPrice += Number(product.base_price);
     };
 
-    const findBest = async (category: ProductCategory, categoryBudget: number): Promise<Product | null> => {
-      const within = await this.productRepo
-        .createQueryBuilder('p')
-        .where('p.category = :cat', { cat: category })
-        .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-        .andWhere('p.base_price <= :budget', { budget: categoryBudget * 1.15 })
-        .orderBy('p.base_price', 'DESC').getOne();
-      if (within) return within;
-      return this.productRepo.createQueryBuilder('p')
-        .where('p.category = :cat', { cat: category })
-        .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-        .orderBy('p.base_price', 'ASC').getOne();
-    };
+    const findBest = (category: ProductCategory, categoryBudget: number) =>
+      this.findBest(category, categoryBudget);
 
     // ── Step 1: CPU ──────────────────────────────────────────────────────────
     const cpuBudget = budget * (ratios['cpu'] ?? 0);
     let cpuProduct: Product | null = null;
     if (CATEGORY_MAP['cpu']) {
-      cpuProduct = await findBest(CATEGORY_MAP['cpu'], cpuBudget);
+      cpuProduct = forcedCpu ?? await findBest(CATEGORY_MAP['cpu'], cpuBudget);
       if (cpuProduct) addComponent('cpu', cpuProduct, cpuBudget);
     }
 
