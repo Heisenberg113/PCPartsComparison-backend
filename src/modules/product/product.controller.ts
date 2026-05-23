@@ -2,15 +2,22 @@ import {
   Controller,
   Get,
   Post,
+  Put,
+  Delete,
   Param,
   Query,
   Body,
   ParseIntPipe,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiQuery, ApiBearerAuth } from '@nestjs/swagger';
 import { ProductService } from './product.service';
-import { FilterProductDto, CompareProductsDto } from './dto';
+import { FilterProductDto, CompareProductsDto, CreateProductDto, UpdateProductDto } from './dto';
 import { ProductCategory } from '../../entities';
+import { JwtAuthGuard, RolesGuard } from '../auth/guards';
+import { Roles } from '../auth/decorators';
 
 @ApiTags('Products')
 @Controller('products')
@@ -52,5 +59,38 @@ export class ProductController {
   @ApiOperation({ summary: 'Tìm linh kiện theo slug' })
   findBySlug(@Param('slug') slug: string) {
     return this.productService.findBySlug(slug);
+  }
+
+  // --- Admin endpoints ---
+
+  @Post()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Tạo sản phẩm mới' })
+  createProduct(@Body() dto: CreateProductDto) {
+    return this.productService.create(dto);
+  }
+
+  @Put(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Cập nhật sản phẩm' })
+  updateProduct(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateProductDto,
+  ) {
+    return this.productService.update(id, dto);
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: '[Admin] Xóa sản phẩm' })
+  removeProduct(@Param('id', ParseIntPipe) id: number) {
+    return this.productService.remove(id);
   }
 }

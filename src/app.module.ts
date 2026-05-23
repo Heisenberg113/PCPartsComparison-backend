@@ -16,6 +16,7 @@ import { ReviewModule } from './modules/review/review.module';
 import { BuildModule } from './modules/build/build.module';
 import { SearchModule } from './modules/search/search.module';
 import { PriceCrawlerModule } from './modules/price-crawler/price-crawler.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { PriceCrawlerModule } from './modules/price-crawler/price-crawler.module
     BuildModule,
     SearchModule,
     PriceCrawlerModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

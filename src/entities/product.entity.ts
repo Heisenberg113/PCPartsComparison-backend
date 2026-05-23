@@ -68,8 +68,12 @@ export class Product {
   @Column({ type: 'int', nullable: true })
   ext_review_count: number | null;
 
+  // Điểm benchmark PassMark (CPU: PassMark CPU Mark, GPU: PassMark GPU Mark)
+  @Column({ type: 'int', nullable: true })
+  benchmark_score: number | null;
+
   @Column({
-  type: 'vector', 
+  type: 'vector',
   length: 1024,
   nullable: true 
   })

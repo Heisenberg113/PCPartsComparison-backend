@@ -1,1 +1,1 @@
-export { FilterProductDto, CompareProductsDto } from './product.dto';
+export { FilterProductDto, CompareProductsDto, CreateProductDto, UpdateProductDto } from './product.dto';

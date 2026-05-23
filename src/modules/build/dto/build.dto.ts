@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, IsObject, Min, Max } from 'class-validator';
+import { IsNumber, IsOptional, IsString, IsObject, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -16,6 +16,14 @@ export class SuggestBuildDto {
   @IsOptional()
   @IsString()
   purpose?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tỉ lệ ngân sách tùy chỉnh, e.g. {"cpu":0.25,"gpu":0.35,...}',
+    example: { cpu: 0.25, gpu: 0.35, ram: 0.10, harddrive: 0.08, mainboard: 0.10, psu: 0.07, case: 0.05 },
+  })
+  @IsOptional()
+  @IsObject()
+  custom_ratios?: Record<string, number>;
 }
 
 export class SaveBuildDto {
@@ -41,9 +49,7 @@ export class UpdateBuildDto {
   @IsString()
   name?: string;
 
-  @ApiPropertyOptional({
-    example: { cpu: 1, gpu: 7, ram: 12, harddrive: 16, mainboard: 20, psu: 23, case: 25 },
-  })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
   components?: Record<string, any>;
@@ -54,4 +60,3 @@ export class UpdateBuildDto {
   @IsNumber()
   total_price?: number;
 }
-

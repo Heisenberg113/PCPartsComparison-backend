@@ -20,6 +20,12 @@ import { CurrentUser } from '../auth/decorators';
 export class BuildController {
   constructor(private readonly buildService: BuildService) { }
 
+  @Get('ratios')
+  @ApiOperation({ summary: 'Lấy tỉ lệ ngân sách và giải thích theo từng mục đích' })
+  getBudgetRatios() {
+    return this.buildService.getBudgetRatios();
+  }
+
   @Post('suggest')
   @ApiOperation({ summary: 'Gợi ý cấu hình PC theo ngân sách' })
   suggest(@Body() dto: SuggestBuildDto) {

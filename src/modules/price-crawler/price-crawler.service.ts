@@ -96,6 +96,10 @@ const SHOPS: ShopConfig[] = [
 @Injectable()
 export class PriceCrawlerService {
     private readonly logger = new Logger(PriceCrawlerService.name);
+    private isCrawling = false;
+    private stopRequested = false;
+    private readonly logBuffer: string[] = [];
+    private readonly LOG_BUFFER_MAX = 300;
 
     constructor(
         @InjectRepository(Product)
@@ -104,6 +108,47 @@ export class PriceCrawlerService {
         private readonly priceRepo: Repository<Price>,
     ) { }
 
+    // ── Status / control ──────────────────────────────────────────────────────
+
+    async getCrawlStatus() {
+        const recentlyCrawled: {
+            id: number; name: string; category: string; brand: string;
+            last_crawled: string; shop_count: number; min_price: number;
+        }[] = await this.priceRepo.manager.query(`
+            SELECT p.id, p.name, p.category, p.brand,
+                   MAX(pr.crawled_at)          AS last_crawled,
+                   COUNT(DISTINCT pr.shop_name)::int AS shop_count,
+                   MIN(pr.price)::int          AS min_price
+            FROM prices pr
+            JOIN products p ON p.id = pr.product_id
+            GROUP BY p.id, p.name, p.category, p.brand
+            ORDER BY last_crawled DESC
+            LIMIT 15
+        `);
+        return { isCrawling: this.isCrawling, logs: [...this.logBuffer], recentlyCrawled };
+    }
+
+    stopCrawl() {
+        if (this.isCrawling) this.stopRequested = true;
+    }
+
+    async getProductsWithoutPrices(): Promise<{ id: number; name: string; category: string; brand: string }[]> {
+        return this.productRepo.manager.query(`
+            SELECT p.id, p.name, p.category, p.brand
+            FROM products p
+            WHERE NOT EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = p.id)
+            ORDER BY p.category, p.id
+        `);
+    }
+
+    private crawlLog(msg: string) {
+        const ts = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+        const entry = `[${ts}] ${msg}`;
+        this.logBuffer.push(entry);
+        if (this.logBuffer.length > this.LOG_BUFFER_MAX) this.logBuffer.shift();
+        this.logger.log(msg);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // PUBLIC API
     // ══════════════════════════════════════════════════════════════════════════
@@ -111,7 +156,12 @@ export class PriceCrawlerService {
     async crawlByProductId(productId: number): Promise<CrawlResult> {
         const product = await this.productRepo.findOne({ where: { id: productId } });
         if (!product) throw new Error(`Product #${productId} không tồn tại`);
-        return this.crawlProduct(product);
+        const browser = await this.launchBrowser();
+        try {
+            return await this.crawlProduct(product, browser);
+        } finally {
+            await browser.close();
+        }
     }
 
     async crawlAllProducts(fromId?: number, toId?: number): Promise<CrawlResult[]> {
@@ -119,18 +169,99 @@ export class PriceCrawlerService {
         if (fromId !== undefined) qb.andWhere('p.id >= :fromId', { fromId });
         if (toId !== undefined) qb.andWhere('p.id <= :toId', { toId });
         const products = await qb.getMany();
-        const results: CrawlResult[] = [];
+        return this.crawlProductList(products);
+    }
 
-        for (const product of products) {
-            try {
-                const result = await this.crawlProduct(product);
-                results.push(result);
-                this.logger.log(`✅ ${product.name}: saved ${result.saved_count} prices`);
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                this.logger.error(`❌ ${product.name}: ${message}`);
+    async crawlMissingPrices(): Promise<CrawlResult[]> {
+        const products: Product[] = await this.productRepo.manager.query(`
+            SELECT p.*
+            FROM products p
+            WHERE NOT EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = p.id)
+            ORDER BY p.id
+        `);
+        this.crawlLog(`🔍 Tìm thấy ${products.length} sản phẩm chưa có giá.`);
+        return this.crawlProductList(products);
+    }
+
+    // Cron: mỗi category lấy 100 sản phẩm có giá cũ nhất (hoặc chưa có giá)
+    async crawlSmartCron(): Promise<CrawlResult[]> {
+        const CATEGORIES = ['cpu', 'gpu', 'ram', 'harddrive', 'mainboard', 'psu', 'case', 'cooler', 'monitor'];
+        const allProducts: Product[] = [];
+        for (const cat of CATEGORIES) {
+            const rows: Product[] = await this.productRepo.manager.query(`
+                SELECT p.*
+                FROM products p
+                WHERE p.category = $1
+                ORDER BY (
+                    SELECT MAX(pr.crawled_at) FROM prices pr WHERE pr.product_id = p.id
+                ) ASC NULLS FIRST
+                LIMIT 100
+            `, [cat]);
+            allProducts.push(...rows);
+        }
+        this.crawlLog(`📋 Smart cron: ${allProducts.length} sản phẩm từ ${CATEGORIES.length} categories.`);
+        return this.crawlProductList(allProducts);
+    }
+
+    // ── Core list crawl ───────────────────────────────────────────────────────
+
+    private async crawlProductList(products: Product[]): Promise<CrawlResult[]> {
+        if (this.isCrawling) {
+            this.crawlLog('⚠️ Crawl đang chạy, bỏ qua để tránh chạy song song.');
+            return [];
+        }
+        this.isCrawling = true;
+        this.stopRequested = false;
+        this.crawlLog(`🚀 Bắt đầu crawl ${products.length} sản phẩm...`);
+
+        const results: CrawlResult[] = [];
+        const CONCURRENCY = 3;
+        const BROWSER_RESTART_EVERY = 30;
+        let browser = await this.launchBrowser();
+        let processedSinceRestart = 0;
+
+        try {
+            for (let i = 0; i < products.length; i += CONCURRENCY) {
+                if (this.stopRequested) {
+                    this.crawlLog('🛑 Crawl bị dừng theo yêu cầu admin.');
+                    break;
+                }
+
+                if (processedSinceRestart >= BROWSER_RESTART_EVERY) {
+                    this.crawlLog('♻️ Khởi động lại browser để giải phóng bộ nhớ...');
+                    await browser.close();
+                    browser = await this.launchBrowser();
+                    processedSinceRestart = 0;
+                }
+
+                const batch = products.slice(i, i + CONCURRENCY);
+                const batchResults = await Promise.all(
+                    batch.map(product =>
+                        this.crawlProduct(product, browser)
+                            .then(result => {
+                                this.crawlLog(`✅ ${product.name}: saved ${result.saved_count} prices`);
+                                return result;
+                            })
+                            .catch(err => {
+                                const message = err instanceof Error ? err.message : String(err);
+                                this.crawlLog(`❌ ${product.name}: ${message}`);
+                                return null;
+                            }),
+                    ),
+                );
+                results.push(...batchResults.filter((r): r is CrawlResult => r !== null));
+                processedSinceRestart += batch.length;
+
+                if (i + CONCURRENCY < products.length) {
+                    await this.sleepRandom(2000, 4000);
+                }
             }
-            await this.sleepRandom(5000, 12000);
+        } finally {
+            await browser.close();
+            this.isCrawling = false;
+            this.stopRequested = false;
+            const saved = results.reduce((s, r) => s + r.saved_count, 0);
+            this.crawlLog(`🏁 Hoàn thành. ${results.length} sản phẩm, ${saved} bản ghi giá mới.`);
         }
 
         return results;
@@ -140,7 +271,7 @@ export class PriceCrawlerService {
     // CORE CRAWL FLOW
     // ══════════════════════════════════════════════════════════════════════════
 
-    private async crawlProduct(product: Product): Promise<CrawlResult> {
+    private async crawlProduct(product: Product, browser: Browser): Promise<CrawlResult> {
         const errors: string[] = [];
 
         let cleanName = product.name
@@ -168,19 +299,23 @@ export class PriceCrawlerService {
             cleanName = PriceCrawlerService.parsePsuName(cleanName);
         }
 
-        this.logger.debug(`🔍 Crawling prices for: "${cleanName}"`);
+        // Một số shop dùng khoảng trắng thay gạch ngang trong tên model (vd "i5 12600KF" thay vì "i5-12600KF")
+        const searchQuery = cleanName.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+        this.logger.debug(`🔍 Crawling prices for: "${searchQuery}"`);
 
-        const shopResults = await this.searchAllShops(cleanName);
+        const shopResults = await this.searchAllShops(searchQuery, product.category, browser);
         this.logger.debug(`Found ${shopResults.length} shops for "${product.name}"`);
 
+        const saveSettled = await Promise.allSettled(
+            shopResults.map(shop => this.upsertPrice(product.id, shop)),
+        );
         let savedCount = 0;
-        for (const shop of shopResults) {
-            try {
-                await this.upsertPrice(product.id, shop);
+        for (const [i, res] of saveSettled.entries()) {
+            if (res.status === 'fulfilled') {
                 savedCount++;
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                errors.push(`Save failed [${shop.shop_name}]: ${message}`);
+            } else {
+                const message = res.reason instanceof Error ? res.reason.message : String(res.reason);
+                errors.push(`Save failed [${shopResults[i].shop_name}]: ${message}`);
             }
         }
 
@@ -203,25 +338,37 @@ export class PriceCrawlerService {
     // SHOP SEARCH — chia sẻ 1 browser instance cho tất cả shops
     // ══════════════════════════════════════════════════════════════════════════
 
-    private async searchAllShops(productName: string): Promise<ShopResult[]> {
+    private launchBrowser(): Promise<Browser> {
+        return puppeteer.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--disable-background-networking',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--renderer-process-limit=4',
+            ],
+        });
+    }
+
+    // Mở các shop theo từng batch nhỏ để giới hạn số tab đồng thời
+    private async searchAllShops(productName: string, category: string, browser: Browser): Promise<ShopResult[]> {
         const results: ShopResult[] = [];
-        let browser: Browser | null = null;
-
-        try {
-            browser = await puppeteer.launch({
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                ],
-            });
-
-            // Mở tất cả các shop song song, mỗi shop một tab riêng
+        const SHOP_BATCH = 3; // tối đa 3 tab/lần thay vì mở hết 6 cùng lúc
+        for (let i = 0; i < SHOPS.length; i += SHOP_BATCH) {
+            const batch = SHOPS.slice(i, i + SHOP_BATCH);
             const settled = await Promise.all(
-                SHOPS.map(shop =>
-                    this.scrapeShop(shop, shop.searchUrl(productName), productName, browser!)
+                batch.map(shop =>
+                    this.scrapeShop(shop, shop.searchUrl(productName), productName, category, browser)
                         .catch(err => {
                             this.logger.warn(`[${shop.name}] failed: ${err instanceof Error ? err.message : err}`);
                             return null;
@@ -229,12 +376,7 @@ export class PriceCrawlerService {
                 ),
             );
             results.push(...settled.filter((r): r is ShopResult => r !== null));
-        } catch (err) {
-            this.logger.error(`Puppeteer launch failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-            await browser?.close();
         }
-
         return results;
     }
 
@@ -246,10 +388,12 @@ export class PriceCrawlerService {
         config: ShopConfig,
         searchUrl: string,
         productName: string,
+        category: string,
         browser: Browser,
     ): Promise<ShopResult | null> {
         this.logger.debug(`🔍 [${config.name}] ${searchUrl}`);
         const page = await browser.newPage();
+        let pageActive = true;
 
         try {
             // Ẩn dấu hiệu headless để tránh bot detection (quan trọng cho CellphoneS)
@@ -259,20 +403,15 @@ export class PriceCrawlerService {
                 (window as any).chrome = { runtime: {} };
             });
 
-            // Chuyển browser console.log sang NestJS logger để debug
-            page.on('console', msg => {
-                if (msg.type() === 'log') {
-                    this.logger.debug(`[${config.name}] ${msg.text()}`);
-                }
-            });
-
             // Chặn image/font/media để tăng tốc độ tải trang
+            // .catch() bắt "Request is already handled" khi page đóng giữa chừng
             await page.setRequestInterception(true);
             page.on('request', req => {
+                if (!pageActive) return;
                 if (['image', 'font', 'media'].includes(req.resourceType())) {
-                    req.abort();
+                    req.abort().catch(() => {});
                 } else {
-                    req.continue();
+                    req.continue().catch(() => {});
                 }
             });
 
@@ -288,16 +427,29 @@ export class PriceCrawlerService {
                 .waitForSelector(config.containerSel, { timeout: config.selectorTimeout ?? 8000 })
                 .catch(() => this.logger.debug(`[${config.name}] waitForSelector timeout — proceeding`));
 
+            // Từ khóa cần LOẠI TRỪ theo category để tránh match nhầm sang sản phẩm khác loại
+            const CATEGORY_BLACKLIST: Record<string, RegExp> = {
+                mainboard: /\b(vga|gpu|rtx|gtx|rx\s*\d|radeon|geforce|tản\s*nhiệt|cooler|nguồn|psu)\b/i,
+                gpu:       /\b(mainboard|motherboard|bo\s*mạch|nguồn|psu|tản\s*nhiệt|cooler)\b/i,
+                cpu:       /\b(mainboard|motherboard|bo\s*mạch|vga|gpu|rtx|gtx|tản\s*nhiệt|cooler)\b/i,
+                psu:       /\b(mainboard|motherboard|vga|gpu|tản\s*nhiệt|cooler|ổ\s*cứng|ssd|hdd)\b/i,
+                cooler:    /\b(mainboard|motherboard|vga|gpu|nguồn|psu|ổ\s*cứng|ram)\b/i,
+                ram:       /\b(mainboard|motherboard|vga|gpu|tản\s*nhiệt|nguồn|ổ\s*cứng|ssd)\b/i,
+                harddrive: /\b(mainboard|motherboard|vga|gpu|ram|tản\s*nhiệt|nguồn|case)\b/i,
+            };
             const params = {
                 pName: productName,
                 containerSel: config.containerSel,
                 nameSel: config.nameSel,
                 priceSel: config.priceSel,
                 linkSel: config.linkSel,
+                blacklistPattern: CATEGORY_BLACKLIST[category]?.source ?? null,
+                blacklistFlags: CATEGORY_BLACKLIST[category]?.flags ?? 'i',
             };
 
             const result = await page.evaluate((p) => {
-                const { pName, containerSel, nameSel, priceSel, linkSel } = p;
+                const { pName, containerSel, nameSel, priceSel, linkSel, blacklistPattern, blacklistFlags } = p;
+                const blacklist = blacklistPattern ? new RegExp(blacklistPattern, blacklistFlags) : null;
                 const items = Array.from(document.querySelectorAll(containerSel));
                 console.log(`${containerSel} → ${items.length} items`);
 
@@ -321,6 +473,9 @@ export class PriceCrawlerService {
                     // Lọc sản phẩm bundle (bộ PC đóng gói chứa nhiều linh kiện)
                     if (/\bPC\b\s+(Gaming|PV\b|Văn\s+phòng|Office|AMD|Intel)/i.test(titleText)
                         || /Bộ\s+máy\s+tính/i.test(titleText)) continue;
+
+                    // Lọc sản phẩm sai danh mục (mainboard không được match VGA, v.v.)
+                    if (blacklist && blacklist.test(titleText)) continue;
 
                     // Khớp từ khóa — loại bỏ stopword; giữ lại từ 2 ký tự nếu có chứa số (64, i7...)
                     const words = pName
@@ -405,6 +560,8 @@ export class PriceCrawlerService {
                 in_stock: true,
             };
         } finally {
+            pageActive = false;
+            page.removeAllListeners();
             await page.close();
         }
     }

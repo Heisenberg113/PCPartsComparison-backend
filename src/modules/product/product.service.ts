@@ -1,8 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, SelectQueryBuilder } from 'typeorm';
 import { Product, ProductCategory } from '../../entities';
-import { FilterProductDto } from './dto';
+import { FilterProductDto, CreateProductDto, UpdateProductDto } from './dto';
 
 @Injectable()
 export class ProductService {
@@ -80,6 +80,11 @@ export class ProductService {
       }
     }
 
+    // Benchmark filter
+    if (filter.has_benchmark) {
+      qb.andWhere('p.benchmark_score IS NOT NULL');
+    }
+
     // Sorting
     const sortBy = filter.sort_by || 'created_at';
     const sortDir = filter.sort_order === 'ASC' ? 'ASC' : 'DESC';
@@ -90,8 +95,10 @@ export class ProductService {
         sortDir,
         'NULLS LAST',
       );
+    } else if (sortBy === 'benchmark_score') {
+      qb.orderBy('p.benchmark_score', sortDir, 'NULLS LAST');
     } else {
-      const sortField = ['name', 'avg_rating', 'created_at'].includes(sortBy)
+      const sortField = ['id', 'name', 'avg_rating', 'created_at'].includes(sortBy)
         ? `p.${sortBy}`
         : 'p.created_at';
       qb.orderBy(sortField, sortDir);
@@ -190,5 +197,65 @@ export class ProductService {
       .getRawMany();
 
     return result;
+  }
+
+  async create(dto: CreateProductDto) {
+    const slug = this.toSlug(dto.name);
+    const existing = await this.productRepo.findOne({ where: { slug } });
+    if (existing) throw new ConflictException('Slug đã tồn tại, hãy đổi tên sản phẩm');
+
+    const product = this.productRepo.create({
+      name: dto.name,
+      slug,
+      category: dto.category,
+      brand: dto.brand,
+      specs: dto.specs ?? {},
+      image_url: dto.image_url,
+      description: dto.description,
+      base_price: dto.base_price,
+    });
+    return this.productRepo.save(product);
+  }
+
+  async update(id: number, dto: UpdateProductDto) {
+    const product = await this.productRepo.findOne({ where: { id } });
+    if (!product) throw new NotFoundException(`Không tìm thấy sản phẩm với id ${id}`);
+
+    if (dto.name && dto.name !== product.name) {
+      const slug = this.toSlug(dto.name);
+      const conflict = await this.productRepo.findOne({ where: { slug } });
+      if (conflict && conflict.id !== id) throw new ConflictException('Slug đã tồn tại');
+      product.slug = slug;
+    }
+
+    Object.assign(product, {
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.category !== undefined && { category: dto.category }),
+      ...(dto.brand !== undefined && { brand: dto.brand }),
+      ...(dto.specs !== undefined && { specs: dto.specs }),
+      ...(dto.image_url !== undefined && { image_url: dto.image_url }),
+      ...(dto.description !== undefined && { description: dto.description }),
+      ...(dto.base_price !== undefined && { base_price: dto.base_price }),
+    });
+
+    return this.productRepo.save(product);
+  }
+
+  async remove(id: number) {
+    const product = await this.productRepo.findOne({ where: { id } });
+    if (!product) throw new NotFoundException(`Không tìm thấy sản phẩm với id ${id}`);
+    await this.productRepo.remove(product);
+    return { message: 'Đã xóa sản phẩm thành công' };
+  }
+
+  private toSlug(name: string): string {
+    return name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
   }
 }
