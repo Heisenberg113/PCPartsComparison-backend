@@ -7,10 +7,10 @@ import { SuggestBuildDto, SaveBuildDto, UpdateBuildDto } from './dto';
 // ─── Budget allocation presets ───────────────────────────────────────────────
 
 const BUDGET_RATIOS: Record<string, Record<string, number>> = {
-  gaming:      { cpu: 0.20, gpu: 0.35, ram: 0.08, harddrive: 0.08, mainboard: 0.12, psu: 0.08, case: 0.09 },
-  workstation: { cpu: 0.30, gpu: 0.25, ram: 0.12, harddrive: 0.10, mainboard: 0.10, psu: 0.06, case: 0.07 },
-  office:      { cpu: 0.25, gpu: 0.10, ram: 0.15, harddrive: 0.15, mainboard: 0.15, psu: 0.10, case: 0.10 },
-  streaming:   { cpu: 0.25, gpu: 0.30, ram: 0.10, harddrive: 0.10, mainboard: 0.10, psu: 0.08, case: 0.07 },
+  gaming:      { cpu: 0.20, gpu: 0.35, ram: 0.08, harddrive: 0.08, mainboard: 0.12, psu: 0.08, case: 0.04, cooler: 0.05 },
+  workstation: { cpu: 0.30, gpu: 0.25, ram: 0.12, harddrive: 0.10, mainboard: 0.10, psu: 0.06, case: 0.02, cooler: 0.05 },
+  office:      { cpu: 0.25, gpu: 0.10, ram: 0.15, harddrive: 0.15, mainboard: 0.15, psu: 0.10, case: 0.05, cooler: 0.05 },
+  streaming:   { cpu: 0.25, gpu: 0.30, ram: 0.10, harddrive: 0.10, mainboard: 0.10, psu: 0.08, case: 0.02, cooler: 0.05 },
 };
 
 
@@ -22,10 +22,11 @@ export const RATIO_EXPLANATIONS: Record<string, { label: string; description: st
       gpu:        'GPU (35%) — Thành phần quan trọng nhất, ảnh hưởng trực tiếp đến FPS',
       cpu:        'CPU (20%) — Cần đủ mạnh để không bottleneck GPU',
       mainboard:  'Mainboard (12%) — Bo mạch chủ ổn định, hỗ trợ OC nếu cần',
-      case:       'Case (9%) — Vỏ máy đảm bảo tản nhiệt, airflow tốt',
+      cooler:     'Tản nhiệt (5%) — Tiết kiệm nếu CPU đã kèm cooler box',
       psu:        'PSU (8%) — Nguồn đủ công suất cho GPU cao cấp',
       harddrive:  'HDD/SSD (8%) — Ưu tiên SSD NVMe cho load game nhanh',
       ram:        'RAM (8%) — 16–32GB DDR5 là đủ cho gaming hiện tại',
+      case:       'Case (4%) — Vỏ máy đảm bảo tản nhiệt, airflow tốt',
     },
   },
   workstation: {
@@ -37,8 +38,9 @@ export const RATIO_EXPLANATIONS: Record<string, { label: string; description: st
       ram:        'RAM (12%) — Cần nhiều RAM cho multi-tasking, VM',
       harddrive:  'HDD/SSD (10%) — SSD nhanh cho project files',
       mainboard:  'Mainboard (10%) — Nhiều khe RAM, PCIe cho mở rộng',
+      cooler:     'Tản nhiệt (5%) — Tản nhiệt tốt cho tải nặng 24/7; tiết kiệm nếu CPU kèm cooler',
       psu:        'PSU (6%) — Nguồn ổn định cho uptime 24/7',
-      case:       'Case (7%) — Tản nhiệt tốt cho tải nặng liên tục',
+      case:       'Case (2%) — Tản nhiệt tốt cho tải nặng liên tục',
     },
   },
   office: {
@@ -50,8 +52,9 @@ export const RATIO_EXPLANATIONS: Record<string, { label: string; description: st
       ram:        'RAM (15%) — 16GB thoải mái cho đa nhiệm văn phòng',
       harddrive:  'HDD/SSD (15%) — Lưu trữ đủ cho tài liệu, dữ liệu',
       psu:        'PSU (10%) — Nguồn đủ dùng, tiết kiệm điện',
-      case:       'Case (10%) — Vỏ nhỏ gọn, yên tĩnh',
       gpu:        'GPU (10%) — Dùng iGPU CPU; GPU rời chỉ khi có nhu cầu',
+      cooler:     'Tản nhiệt (5%) — Giữ CPU mát; tiết kiệm nếu CPU kèm cooler box',
+      case:       'Case (5%) — Vỏ nhỏ gọn, yên tĩnh',
     },
   },
   streaming: {
@@ -64,7 +67,8 @@ export const RATIO_EXPLANATIONS: Record<string, { label: string; description: st
       harddrive:  'HDD/SSD (10%) — Lưu stream recordings, highlight',
       ram:        'RAM (10%) — 32GB cho game + OBS + tools stream',
       psu:        'PSU (8%) — Nguồn đủ cho GPU + CPU tải cao liên tục',
-      case:       'Case (7%) — Airflow tốt tránh nhiệt khi stream giờ dài',
+      cooler:     'Tản nhiệt (5%) — Quan trọng khi stream giờ dài; tiết kiệm nếu CPU kèm cooler',
+      case:       'Case (2%) — Airflow tốt tránh nhiệt khi stream giờ dài',
     },
   },
 };
@@ -455,7 +459,7 @@ export class BuildService {
       const needsCooler = includesCooler === 'No' || includesCooler === false;
       if (needsCooler) {
         const cpuSocket = cpuProduct.specs?.['Socket'] ?? cpuProduct.specs?.socket ?? null;
-        const coolerBudget = Math.min(budget * 0.05, remainingBudget);
+        const coolerBudget = cap('cooler');
         let coolerProduct: Product | null = null;
 
         if (cpuSocket) {
