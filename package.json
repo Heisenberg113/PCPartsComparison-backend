@@ -19,7 +19,8 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "seed": "ts-node src/seeds/seed.ts",
-    "benchmark:crawl": "ts-node src/scripts/benchmark-crawler.ts"
+    "benchmark:crawl": "ts-node src/scripts/benchmark-crawler.ts",
+    "benchmark:clear": "node -e \"const {Pool}=require('pg');const p=new Pool({host:process.env.DB_HOST||'localhost',port:+(process.env.DB_PORT||5432),user:process.env.DB_USERNAME,password:process.env.DB_PASSWORD,database:process.env.DB_DATABASE});p.query('UPDATE products SET benchmark_score=NULL WHERE category IN ($1,$2)',['cpu','gpu']).then(r=>{console.log('Cleared rows:',r.rowCount);p.end()}).catch(e=>{console.error(e.message);p.end()});\""
   },
   "dependencies": {
     "@nestjs/axios": "^4.0.1",

@@ -99,21 +99,36 @@ function parseM2Size(formFactor: string): string | null {
   return m ? m[1] : null;
 }
 
-// Larger M-key slot sizes that physically accommodate standard 2280 drives
-const M2_COMPAT_WITH_2280 = new Set(['2580', '25110', '22110']);
-
+// Parse "2280" → {w:22, l:80}, "22110" → {w:22, l:110}, "2580" → {w:25, l:80}
+function parseM2Dims(size: string): { w: number; l: number } | null {
+  const m = size.match(/^(\d{2})(\d{2,3})$/);
+  if (!m) return null;
+  return { w: parseInt(m[1]), l: parseInt(m[2]) };
+}
+// A 22mm drive fits any slot with length ≥ drive length (including 25mm wide slots).
+// A 25mm drive only fits 25mm slots with length ≥ drive length.
+function m2DriveFitsSlot(driveSize: string, slotSize: string): boolean {
+  if (driveSize === slotSize) return true;
+  const drive = parseM2Dims(driveSize);
+  const slot = parseM2Dims(slotSize);
+  if (!drive || !slot) return false;
+  return slot.l >= drive.l && (slot.w === drive.w || (drive.w === 22 && slot.w === 25));
+}
 function m2SizeCompatible(size: string, slots: string[]): boolean {
-  return slots.some((slot) => {
-    const nums = slot.replace(/[^0-9/]/g, '').split('/').filter(Boolean);
-    if (nums.includes(size)) return true;
-    if (size === '2280' && nums.some((n) => M2_COMPAT_WITH_2280.has(n))) return true;
-    return false;
-  });
+  return slots.some((slot) =>
+    slot.replace(/[^0-9/]/g, '').split('/').filter(Boolean).some((n) => m2DriveFitsSlot(size, n))
+  );
 }
 
 function parseSataCount(sata: string | number | null | undefined): number {
   if (typeof sata === 'number') return sata;
   const m = (sata || '').match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function parseTDPValue(v: string | number | null | undefined): number {
+  if (typeof v === 'number') return v;
+  const m = (v || '').match(/(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
@@ -144,7 +159,7 @@ export class BuildService {
       .where('p.category = :cat', { cat: CATEGORY_MAP['cpu'] })
       .andWhere('p.base_price IS NOT NULL')
       .andWhere('p.base_price > 0')
-      .andWhere('p.base_price <= :budget', { budget: cpuBudget * 1.15 })
+      .andWhere('p.base_price <= :budget', { budget: cpuBudget })
       .orderBy('p.base_price', 'DESC')
       .limit(3)
       .getMany();
@@ -169,20 +184,14 @@ export class BuildService {
     };
   }
 
-  private async findBest(category: ProductCategory, categoryBudget: number): Promise<Product | null> {
-    const within = await this.productRepo
-      .createQueryBuilder('p')
-      .where('p.category = :cat', { cat: category })
-      .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-      .andWhere('p.base_price <= :budget', { budget: categoryBudget * 1.15 })
-      .orderBy('p.base_price', 'DESC')
-      .getOne();
-    if (within) return within;
+  private async findBest(category: ProductCategory, maxPrice: number): Promise<Product | null> {
+    if (maxPrice <= 0) return null;
     return this.productRepo
       .createQueryBuilder('p')
       .where('p.category = :cat', { cat: category })
       .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-      .orderBy('p.base_price', 'ASC')
+      .andWhere('p.base_price <= :budget', { budget: maxPrice })
+      .orderBy('p.base_price', 'DESC')
       .getOne();
   }
 
@@ -196,24 +205,33 @@ export class BuildService {
     const suggested: Record<string, any> = {};
     const compatibilityWarnings: string[] = [];
     let totalPrice = 0;
+    let remainingBudget = budget;
 
     const addComponent = (key: string, product: Product, categoryBudget: number) => {
       suggested[key] = {
         product,
         budget_allocated: Math.round(categoryBudget),
-        over_budget: Number(product.base_price) > categoryBudget * 1.15,
+        over_budget: Number(product.base_price) > categoryBudget,
       };
       totalPrice += Number(product.base_price);
+      remainingBudget -= Number(product.base_price);
     };
 
-    const findBest = (category: ProductCategory, categoryBudget: number) =>
-      this.findBest(category, categoryBudget);
+    // Effective ceiling = min(ratio slice, remaining budget)
+    const cap = (key: string) => Math.min(budget * (ratios[key] ?? 0), remainingBudget);
+
+    const findBest = (category: ProductCategory, maxPrice: number) =>
+      this.findBest(category, Math.min(maxPrice, remainingBudget));
 
     // ── Step 1: CPU ──────────────────────────────────────────────────────────
-    const cpuBudget = budget * (ratios['cpu'] ?? 0);
     let cpuProduct: Product | null = null;
     if (CATEGORY_MAP['cpu']) {
-      cpuProduct = forcedCpu ?? await findBest(CATEGORY_MAP['cpu'], cpuBudget);
+      const cpuBudget = cap('cpu');
+      if (forcedCpu) {
+        cpuProduct = Number(forcedCpu.base_price) <= remainingBudget ? forcedCpu : null;
+      } else {
+        cpuProduct = await findBest(CATEGORY_MAP['cpu'], cpuBudget);
+      }
       if (cpuProduct) addComponent('cpu', cpuProduct, cpuBudget);
     }
 
@@ -223,21 +241,57 @@ export class BuildService {
     const cpuHasIGPU = !!cpuIGPU && cpuIGPU.toLowerCase() !== 'none';
     const skipGpu = gpuRatio < 0.15 && cpuHasIGPU;
 
-    // ── Step 3: Non-compatibility components (psu, case, gpu) ────────────────
-    for (const key of Object.keys(ratios)) {
-      if (['cpu', 'mainboard', 'ram', 'harddrive'].includes(key)) continue;
-      if (key === 'gpu' && skipGpu) continue;
-      const cat = CATEGORY_MAP[key];
-      if (!cat) continue;
-      const prod = await findBest(cat, budget * (ratios[key] ?? 0));
-      if (prod) addComponent(key, prod, budget * (ratios[key] ?? 0));
+    let gpuProductRef: Product | null = null;
+    if (!skipGpu && CATEGORY_MAP['gpu'] && remainingBudget > 0) {
+      const gpuBudget = cap('gpu');
+      gpuProductRef = await findBest(CATEGORY_MAP['gpu'], gpuBudget);
+      if (gpuProductRef) addComponent('gpu', gpuProductRef, gpuBudget);
     }
     if (skipGpu) compatibilityWarnings.push(`GPU bỏ qua: CPU có đồ họa tích hợp (${cpuIGPU}).`);
 
-    // ── Step 4: Mainboard (socket match) ─────────────────────────────────────
-    const mbBudget = budget * (ratios['mainboard'] ?? 0);
+    // ── Step 3: Case ─────────────────────────────────────────────────────────
+    if (CATEGORY_MAP['case'] && remainingBudget > 0 && ratios['case']) {
+      const caseBudget = cap('case');
+      const caseProduct = await findBest(CATEGORY_MAP['case'], caseBudget);
+      if (caseProduct) addComponent('case', caseProduct, caseBudget);
+    }
+
+    // ── Step 4: PSU (wattage-aware) ───────────────────────────────────────────
+    if (CATEGORY_MAP['psu'] && remainingBudget > 0 && ratios['psu']) {
+      const psuBudget = cap('psu');
+      const cpuTdp = parseTDPValue(cpuProduct?.specs?.['TDP']);
+      const gpuTdp = parseTDPValue(gpuProductRef?.specs?.['TDP']);
+      const recommended = Math.ceil(((cpuTdp + gpuTdp + 105) * 1.2) / 50) * 50;
+
+      let psuProduct: Product | null = null;
+      if (recommended > 0) {
+        psuProduct = await this.productRepo.createQueryBuilder('p')
+          .where('p.category = :cat', { cat: CATEGORY_MAP['psu'] })
+          .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+          .andWhere('p.base_price <= :budget', { budget: Math.min(psuBudget, remainingBudget) })
+          .andWhere(`regexp_replace(COALESCE(p.specs->>'Wattage', ''), '[^0-9]', '', 'g') ~ '^[0-9]+$'`)
+          .andWhere(`(regexp_replace(COALESCE(p.specs->>'Wattage', ''), '[^0-9]', '', 'g'))::integer >= :minWatts`, { minWatts: recommended })
+          .orderBy('p.base_price', 'DESC')
+          .getOne();
+      }
+
+      if (!psuProduct) {
+        psuProduct = await findBest(CATEGORY_MAP['psu'], psuBudget);
+        if (psuProduct && recommended > 0) {
+          const actualWatts = parseTDPValue(psuProduct.specs?.['Wattage']);
+          if (actualWatts > 0 && actualWatts < recommended) {
+            compatibilityWarnings.push(`PSU ${actualWatts}W có thể không đủ — ước tính cần ~${recommended}W (CPU ${cpuTdp}W + GPU ${gpuTdp}W).`);
+          }
+        }
+      }
+
+      if (psuProduct) addComponent('psu', psuProduct, psuBudget);
+    }
+
+    // ── Step 5: Mainboard (socket match) ─────────────────────────────────────
     let mbProduct: Product | null = null;
-    if (CATEGORY_MAP['mainboard']) {
+    if (CATEGORY_MAP['mainboard'] && remainingBudget > 0) {
+      const mbBudget = cap('mainboard');
       const cpuSocket = cpuProduct?.specs?.['Socket'] ?? cpuProduct?.specs?.socket ?? null;
       if (cpuSocket) {
         const socketCond = `(p.specs->>'Socket / CPU' = :socket OR p.specs->>'socket_cpu' = :socket OR p.specs->>'Socket' = :socket)`;
@@ -247,15 +301,18 @@ export class BuildService {
           .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0');
 
         mbProduct = await mbBase(this.productRepo.createQueryBuilder('p'))
-          .andWhere('p.base_price <= :budget', { budget: mbBudget * 1.15 })
+          .andWhere('p.base_price <= :budget', { budget: Math.min(mbBudget, remainingBudget) })
           .orderBy('p.base_price', 'DESC').getOne();
+
         if (!mbProduct) {
+          // Cheapest compatible mainboard within remaining budget
           mbProduct = await mbBase(this.productRepo.createQueryBuilder('p'))
+            .andWhere('p.base_price <= :budget', { budget: remainingBudget })
             .orderBy('p.base_price', 'ASC').getOne();
         }
+
         if (!mbProduct) {
-          compatibilityWarnings.push(`Không tìm mainboard socket ${cpuSocket}.`);
-          mbProduct = await findBest(CATEGORY_MAP['mainboard'], mbBudget);
+          compatibilityWarnings.push(`Không tìm mainboard socket ${cpuSocket} trong ngân sách còn lại.`);
         }
       } else {
         compatibilityWarnings.push(`CPU thiếu thông tin socket — bỏ qua kiểm tra CPU–Mainboard.`);
@@ -264,9 +321,9 @@ export class BuildService {
       if (mbProduct) addComponent('mainboard', mbProduct, mbBudget);
     }
 
-    // ── Step 5: RAM (DDR type + slot count + total GB) ────────────────────────
-    const ramBudget = budget * (ratios['ram'] ?? 0);
-    if (CATEGORY_MAP['ram']) {
+    // ── Step 6: RAM (DDR type + slot count + total GB) ────────────────────────
+    if (CATEGORY_MAP['ram'] && remainingBudget > 0) {
+      const ramBudget = cap('ram');
       const mbMemType: string | null = mbProduct?.specs?.['Memory Type'] ?? mbProduct?.specs?.memory_type ?? null;
       const mbSlots = parseInt(String(mbProduct?.specs?.['Memory Slots'] ?? mbProduct?.specs?.memory_slots ?? '4'), 10) || 4;
       const mbMemMax = parseGB(mbProduct?.specs?.['Memory Max'] ?? mbProduct?.specs?.memory_max);
@@ -276,7 +333,7 @@ export class BuildService {
           .where('p.category = :cat', { cat: CATEGORY_MAP['ram'] })
           .andWhere(`(p.specs->>'Speed' ILIKE :pattern OR p.specs->>'speed' ILIKE :pattern)`, { pattern: `${mbMemType}%` })
           .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-          .andWhere('p.base_price <= :budget', { budget: ramBudget * 1.15 })
+          .andWhere('p.base_price <= :budget', { budget: Math.min(ramBudget, remainingBudget) })
           .orderBy('p.base_price', 'DESC').getMany();
 
         let ramProduct: Product | null = null;
@@ -290,12 +347,13 @@ export class BuildService {
           break;
         }
 
-        // Fallback: any compatible RAM in DB (cheapest first)
+        // Fallback: cheapest compatible RAM within remaining budget
         if (!ramProduct) {
           const fallbacks = await this.productRepo.createQueryBuilder('p')
             .where('p.category = :cat', { cat: CATEGORY_MAP['ram'] })
             .andWhere(`(p.specs->>'Speed' ILIKE :pattern OR p.specs->>'speed' ILIKE :pattern)`, { pattern: `${mbMemType}%` })
             .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+            .andWhere('p.base_price <= :budget', { budget: remainingBudget })
             .orderBy('p.base_price', 'ASC').getMany();
           for (const c of fallbacks) {
             const parsed = parseRamModules(c.specs?.['Modules'] ?? c.specs?.modules ?? '');
@@ -315,8 +373,7 @@ export class BuildService {
         }
 
         if (!ramProduct) {
-          compatibilityWarnings.push(`Không tìm RAM ${mbMemType} tương thích — gợi ý RAM tốt nhất theo ngân sách.`);
-          ramProduct = await findBest(CATEGORY_MAP['ram'], ramBudget);
+          compatibilityWarnings.push(`Không tìm RAM ${mbMemType} tương thích trong ngân sách còn lại.`);
         }
         if (ramProduct) addComponent('ram', ramProduct, ramBudget);
       } else {
@@ -326,9 +383,9 @@ export class BuildService {
       }
     }
 
-    // ── Step 6: HDD/SSD (M.2 slot + SATA compatibility) ─────────────────────
-    const hddBudget = budget * (ratios['harddrive'] ?? 0);
-    if (CATEGORY_MAP['harddrive']) {
+    // ── Step 7: HDD/SSD (M.2 slot + SATA compatibility) ─────────────────────
+    if (CATEGORY_MAP['harddrive'] && remainingBudget > 0) {
+      const hddBudget = cap('harddrive');
       const mbM2Slots: string[] = (() => {
         const s = mbProduct?.specs?.['M.2 Slots'];
         if (!s) return [];
@@ -346,7 +403,7 @@ export class BuildService {
           .where('p.category = :cat', { cat: CATEGORY_MAP['harddrive'] })
           .andWhere(`p.specs->>'Form Factor' ILIKE :m2`, { m2: 'M.2%' })
           .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-          .andWhere('p.base_price <= :budget', { budget: hddBudget * 1.15 })
+          .andWhere('p.base_price <= :budget', { budget: Math.min(hddBudget, remainingBudget) })
           .orderBy('p.base_price', 'DESC').getMany();
 
         for (const c of m2Candidates) {
@@ -358,12 +415,13 @@ export class BuildService {
           compatibilityWarnings.push(`SSD "${c.name}" (M.2-${size}) không khớp khe M.2 của mainboard.`);
         }
 
-        // Fallback: cheapest compatible M.2
+        // Fallback: cheapest compatible M.2 within remaining budget
         if (!hddProduct) {
           const m2Cheap = await this.productRepo.createQueryBuilder('p')
             .where('p.category = :cat', { cat: CATEGORY_MAP['harddrive'] })
             .andWhere(`p.specs->>'Form Factor' ILIKE :m2`, { m2: 'M.2%' })
             .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+            .andWhere('p.base_price <= :budget', { budget: remainingBudget })
             .orderBy('p.base_price', 'ASC').getMany();
           for (const c of m2Cheap) {
             const size = parseM2Size(c.specs?.['Form Factor'] ?? '');
@@ -378,26 +436,26 @@ export class BuildService {
           .where('p.category = :cat', { cat: CATEGORY_MAP['harddrive'] })
           .andWhere(`(p.specs->>'Form Factor' ILIKE :f25 OR p.specs->>'Form Factor' ILIKE :f35)`, { f25: '2.5%', f35: '3.5%' })
           .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-          .andWhere('p.base_price <= :budget', { budget: hddBudget * 1.15 })
+          .andWhere('p.base_price <= :budget', { budget: Math.min(hddBudget, remainingBudget) })
           .orderBy('p.base_price', 'DESC').getOne();
       }
 
-      // Last resort: any storage
+      // Last resort: any storage within remaining budget
       if (!hddProduct) {
-        compatibilityWarnings.push(`Không tìm ổ cứng tương thích — gợi ý ổ tốt nhất theo ngân sách.`);
+        compatibilityWarnings.push(`Không tìm ổ cứng tương thích — gợi ý ổ tốt nhất theo ngân sách còn lại.`);
         hddProduct = await findBest(CATEGORY_MAP['harddrive'], hddBudget);
       }
 
       if (hddProduct) addComponent('harddrive', hddProduct, hddBudget);
     }
 
-    // ── Step 7: Cooler (only if CPU doesn't include one) ─────────────────────
-    if (cpuProduct && CATEGORY_MAP['cooler']) {
+    // ── Step 8: Cooler (only if CPU doesn't include one) ─────────────────────
+    if (cpuProduct && CATEGORY_MAP['cooler'] && remainingBudget > 0) {
       const includesCooler = cpuProduct.specs?.['Includes Cooler'] ?? cpuProduct.specs?.['Includes CPU Cooler'];
       const needsCooler = includesCooler === 'No' || includesCooler === false;
       if (needsCooler) {
         const cpuSocket = cpuProduct.specs?.['Socket'] ?? cpuProduct.specs?.socket ?? null;
-        const coolerBudget = budget * 0.05;
+        const coolerBudget = Math.min(budget * 0.05, remainingBudget);
         let coolerProduct: Product | null = null;
 
         if (cpuSocket) {
@@ -405,14 +463,16 @@ export class BuildService {
             .where('p.category = :cat', { cat: CATEGORY_MAP['cooler'] })
             .andWhere(`p.specs->'CPU Socket' @> :socket::jsonb`, { socket: JSON.stringify([cpuSocket]) })
             .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
-            .andWhere('p.base_price <= :budget', { budget: coolerBudget * 1.2 })
+            .andWhere('p.base_price <= :budget', { budget: coolerBudget })
             .orderBy('p.base_price', 'DESC').getOne();
 
           if (!coolerProduct) {
+            // Cheapest socket-compatible cooler within remaining budget
             coolerProduct = await this.productRepo.createQueryBuilder('p')
               .where('p.category = :cat', { cat: CATEGORY_MAP['cooler'] })
               .andWhere(`p.specs->'CPU Socket' @> :socket::jsonb`, { socket: JSON.stringify([cpuSocket]) })
               .andWhere('p.base_price IS NOT NULL').andWhere('p.base_price > 0')
+              .andWhere('p.base_price <= :budget', { budget: remainingBudget })
               .orderBy('p.base_price', 'ASC').getOne();
           }
         }

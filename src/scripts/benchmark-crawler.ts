@@ -32,12 +32,56 @@ const dataSource = new DataSource({
 
 async function scrapePage(page: Page, url: string): Promise<Map<string, number>> {
   console.log(`  → Fetching ${url} ...`);
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 45_000 });
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 60_000 });
 
-  const pairs = await page.evaluate(() => {
+  // Extra wait for JS-rendered tables
+  await page.waitForSelector('table tbody tr, #chartlist li', { timeout: 15_000 }).catch(() => {});
+
+  const hostname = new URL(url).hostname;
+  const isCpu = hostname.includes('cpubenchmark');
+
+  const pairs = await page.evaluate((isCpu: boolean) => {
     const out: [string, number][] = [];
 
-    // Strategy A: PassMark classic chartlist  (#chartlist li)
+    // Normalise a raw text string to a benchmark score.
+    // Strips commas/spaces, returns 0 if not a plausible score (>= 100).
+    function toScore(txt: string): number {
+      const n = parseInt(txt.replace(/[^0-9]/g, ''), 10);
+      return Number.isFinite(n) && n >= 100 ? n : 0;
+    }
+
+    // ── Strategy 1: PassMark-specific — follow product links ─────────────────
+    // cpubenchmark.net  → anchors href="/cpu_lookup.php?cpu=..."
+    // videocardbenchmark.net → anchors href="/gpu.php?gpu=..."
+    const selector = isCpu ? 'a[href*="cpu_lookup.php"], a[href*="/cpu.php"]' : 'a[href*="gpu_lookup.php"], a[href*="/gpu.php"]';
+    const productLinks = Array.from(document.querySelectorAll(selector));
+
+    if (productLinks.length > 0) {
+      for (const link of productLinks) {
+        const name = link.textContent?.trim() ?? '';
+        if (!name) continue;
+
+        // Walk up to the table row and find the score cell (only cells AFTER the name)
+        const row = link.closest('tr');
+        if (!row) continue;
+
+        const cells = Array.from(row.querySelectorAll('td'));
+        let score = 0;
+        let passedName = false;
+        for (const cell of cells) {
+          if (cell.contains(link)) { passedName = true; continue; }
+          if (!passedName) continue; // rank column appears before name — skip it
+          if (/[a-zA-Z]/.test(cell.textContent ?? '')) continue;
+          const s = toScore(cell.textContent ?? '');
+          if (s > 0) { score = s; break; }
+        }
+
+        if (score > 0) out.push([name, score]);
+      }
+      if (out.length > 0) return out;
+    }
+
+    // ── Strategy 2: Classic PassMark chartlist (#chartlist li) ───────────────
     const listItems = Array.from(document.querySelectorAll('#chartlist li'));
     if (listItems.length > 0) {
       for (const li of listItems) {
@@ -51,45 +95,63 @@ async function scrapePage(page: Page, url: string): Promise<Map<string, number>>
           li.querySelector('span.mark');
         if (!nameEl || !scoreEl) continue;
         const name = nameEl.textContent?.trim() ?? '';
-        const score = parseInt((scoreEl.textContent ?? '').replace(/[^0-9]/g, ''), 10);
+        const score = toScore(scoreEl.textContent ?? '');
         if (name && score > 0) out.push([name, score]);
       }
-      return out;
+      if (out.length > 0) return out;
     }
 
-    // Strategy B: <table> rows (newer PassMark pages)
+    // ── Strategy 3: Generic table — name = <a> with non-numeric text, score = first numeric-only cell ──
     const rows = Array.from(document.querySelectorAll('table tbody tr'));
     if (rows.length > 0) {
       for (const row of rows) {
         const cells = Array.from(row.querySelectorAll('td'));
         if (cells.length < 2) continue;
-        // First cell has the name link, second cell has the score
-        const nameEl = cells[0].querySelector('a') ?? cells[0];
-        const name = nameEl.textContent?.trim() ?? '';
-        const raw = cells[1].textContent?.replace(/[^0-9]/g, '') ?? '';
-        const score = parseInt(raw, 10);
-        if (name && score > 0) out.push([name, score]);
+
+        // Name cell = first cell with an <a> whose text is NOT purely numeric
+        const nameCell = cells.find(c => {
+          const a = c.querySelector('a');
+          return a && !/^\s*[\d,]+\s*$/.test(a.textContent ?? '');
+        });
+        if (!nameCell) continue;
+        const name = (nameCell.querySelector('a') as HTMLElement)?.textContent?.trim() ?? '';
+        if (!name) continue;
+
+        let score = 0;
+        let passedName = false;
+        for (const cell of cells) {
+          if (cell === nameCell) { passedName = true; continue; }
+          if (!passedName) continue;
+          if (/[a-zA-Z]/.test(cell.textContent ?? '')) continue;
+          const s = toScore(cell.textContent ?? '');
+          if (s > 0) { score = s; break; }
+        }
+
+        if (score > 0) out.push([name, score]);
       }
-      return out;
+      if (out.length > 0) return out;
     }
 
-    // Strategy C: generic — find all <a> next to a number in the same parent
-    const anchors = Array.from(document.querySelectorAll('a[href*="benchmark"]'));
-    for (const a of anchors) {
+    // ── Strategy 4: Last-resort — any anchor + last large number in same row ──
+    // Normalise comma numbers first ("3,081" → "3081") so regex finds them.
+    const allAnchors = Array.from(document.querySelectorAll('a'));
+    for (const a of allAnchors) {
+      const name = a.textContent?.trim() ?? '';
+      if (!name || /^\s*[\d,]+\s*$/.test(name)) continue; // skip pure-number links (ranks)
       const parent = a.closest('li, tr, div');
       if (!parent) continue;
-      const text = parent.textContent ?? '';
-      const numMatch = text.match(/\b(\d{3,6})\b/);
-      if (!numMatch) continue;
-      const name = a.textContent?.trim() ?? '';
-      const score = parseInt(numMatch[1], 10);
-      if (name && score > 0) out.push([name, score]);
+      const normText = (parent.textContent ?? '').replace(/(\d),(\d)/g, '$1$2');
+      const allNums = [...normText.matchAll(/\b(\d{3,7})\b/g)];
+      if (allNums.length === 0) continue;
+      // Use the LAST number — rank typically appears before the name, score after
+      const lastNum = parseInt(allNums[allNums.length - 1][1], 10);
+      if (lastNum >= 100) out.push([name, lastNum]);
     }
 
     return out;
-  });
+  }, isCpu);
 
-  console.log(`  ✓ Scraped ${pairs.length} entries from ${new URL(url).hostname}`);
+  console.log(`  ✓ Scraped ${pairs.length} entries from ${hostname}`);
   return new Map(pairs);
 }
 
@@ -100,10 +162,12 @@ async function scrapePage(page: Page, url: string): Promise<Map<string, number>>
 function normCpu(s: string): string {
   return s
     .replace(/\s+Processor\s*$/i, '')
-    .replace(/\s+\d+(?:\.\d+)?\s*GHz.*/i, '')     // remove freq onwards
-    .replace(/\s+\d+-Core.*/i, '')                  // remove N-Core onwards
+    .replace(/\s*@.*$/, '')
+    .replace(/\s+\d+(?:\.\d+)?\s*GHz.*/i, '')
+    .replace(/\s+\d+-Core.*/i, '')
     .replace(/\s*\(OEM[^)]*\)/gi, '')
-    .replace(/\s*@\s*\d+.*$/, '')
+    .replace(/\bCore(\d)/gi, 'Core $1')             // "Core2" → "Core 2"
+    .replace(/([A-Za-z0-9])([vV]\d+)\b/g, '$1 $2') // "E5-2450V2" → "E5-2450 V2"
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -135,10 +199,20 @@ function matchCpu(
 
   for (const [bName, bScore] of benchMap) {
     const bNorm = normCpu(bName).toLowerCase();
-    // exact match or benchmark name is a prefix/substring of product name
-    if (pNorm === bNorm || pNorm.startsWith(bNorm) || pNorm.includes(bNorm)) {
-      if (!best || bNorm.length > best.len) {
-        best = { score: bScore, matched: bName, len: bNorm.length };
+
+    // 1. Exact match — return immediately
+    if (pNorm === bNorm) return { score: bScore, matched: bName };
+
+    // 2. Benchmark name is a prefix of product name, BUT the next character
+    //    in the product name must be end-of-string or whitespace — never a
+    //    letter/digit/dash that would indicate a different SKU suffix
+    //    (e.g. "i3-6100" must NOT match "i3-6100T")
+    if (pNorm.startsWith(bNorm)) {
+      const next = pNorm[bNorm.length];
+      if (next === undefined || next === ' ') {
+        if (!best || bNorm.length > best.len) {
+          best = { score: bScore, matched: bName, len: bNorm.length };
+        }
       }
     }
   }
